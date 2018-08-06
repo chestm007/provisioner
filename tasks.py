@@ -49,6 +49,8 @@ class Task:
                 self.set_state(cursor, TaskState.PROVISIONING)
                 if self.provision(cursor, provider):
                     self.set_state(cursor, TaskState.PROVISIONED)
+                else:
+                    self.set_state(cursor, TaskState.FAILED)
             elif action == TaskAction.DELETE:
                 self.set_state(cursor, TaskState.DELETING)
                 self.delete(cursor, provider)
@@ -67,7 +69,7 @@ class Task:
             VALUES (%(type)s, %(payload)s, %(cluster)s, %(data_centre)s) 
             RETURNING id
         """, dict(type=type(self).__name__,
-                  payload=json.dumps({}),
+                  payload=json.dumps(self.payload),
                   cluster=cluster_id,
                   data_centre=data_centre_id))
         self.id = cursor.fetchone().id
@@ -151,7 +153,9 @@ class Task:
 
 class DataCentre(Task):
     def provision(self, cursor, provider):
+        print(self.payload)
         self.set_state(cursor, TaskState.PROVISIONED)
+        return True
 
     def delete(self, cursor, provider):
         self.set_state(cursor, TaskState.DELETED)
@@ -160,41 +164,41 @@ class DataCentre(Task):
 class Cluster(Task):
     def provision(self, cursor, provider):
         self.set_state(cursor, TaskState.PROVISIONED)
+        return True
 
     def delete(self, cursor, provider):
         self.set_state(cursor, TaskState.DELETED)
 
 
 class Role(Task):
-    pass
+    def provision(self, cursor, provider):
+        self.set_state(cursor, TaskState.PROVISIONED)
+        return True
 
 
 class VPC(Task):
     def provision(self, cursor, provider):
-        vpc = provider.create_vpc(CidrBlock='192.168.0.0/16')
-        vpc.create_tags(Tags=[{"Key": "Name", "Value": "my new vpc bro"}])
-        vpc.wait_until_available()
-        self.set_payload(cursor, dict(vpc_id=vpc.id))
+        vpc_id = provider.create_vpc(cidr_block='192.168.0.0/16', tags=[{"Key": "Name", "Value": "my new vpc bro"}])
+        self.set_payload(cursor, dict(vpc_id=vpc_id))
+        self.set_state(cursor, TaskState.PROVISIONED)
         return True
 
 
 class BindSecurityGroup(Task):
-    pass
+    def provision(self, cursor, provider):
+        self.set_state(cursor, TaskState.PROVISIONED)
+        return True
 
 
 class InternetGateway(Task):
     def provision(self, cursor, provider):
         parent = self._get_parent(cursor, 'VPC')
         vpc_id = parent.payload['vpc_id']
-        gateway = provider.create_internet_gateway()
-        gateway.create_tags(Tags=[{"Key": "Name", "Value": " Gateway for me brah"}])
-
-        vpc = provider.Vpc(vpc_id)
-        vpc.attach_internet_gateway(
-            InternetGatewayId=gateway.id,
-            VpcId=vpc_id
-        )
-        self.set_payload(cursor, dict(gateway_id=gateway.id, vpc_id=vpc_id))
+        gateway_id = provider.create_internet_gateway(vpc_id=vpc_id, tags=[
+            {'Key': 'Name', 'Value': 'create an internet gateway bruh'}
+        ])
+        self.set_payload(cursor, dict(gateway_id=gateway_id, vpc_id=vpc_id))
+        self.set_state(cursor, TaskState.PROVISIONED)
         return True
 
 
@@ -203,17 +207,14 @@ class RouteTable(Task):
     def provision(self, cursor, provider):
         parent = self._get_parent(cursor, 'InternetGateway')
         payload = parent.payload
-        vpc = provider.Vpc(payload['vpc_id'])
-
-        route_table = vpc.create_route_table()
-        route_table.create_tags(Tags=[{"Key": "Name", "Value": "yisss, route table"}])
-        payload['route_table_id'] = route_table.id
-
-        route_table.create_route(
-            DestinationCidrBlock='0.0.0.0/0',
-            GatewayId=payload['gateway_id'])
+        route_table_id = provider.create_route_table(vpc_id=payload['vpc_id'],
+                                                     destination_cidr_block='0.0.0.0/0',
+                                                     gateway_id=payload['gateway_id'],
+                                                     tags=[{"Key": "Name", "Value": "yisss, route table"}])
+        payload['route_table_id'] = route_table_id
 
         self.set_payload(cursor, payload)
+        self.set_state(cursor, TaskState.PROVISIONED)
         return True
 
 
@@ -221,14 +222,14 @@ class SubNets(Task):
     def provision(self, cursor, provider):
         parent = self._get_parent(cursor, 'RouteTable')
         payload = parent.payload
-        subnet = provider.create_subnet(CidrBlock='192.168.1.0/24', VpcId=payload['vpc_id'])
-        subnet.create_tags(Tags=[{"Key": "Name", "Value": "mah subnet"}])
-        payload['subnet_id'] = subnet.id
+        subnet_id = provider.create_subnet(vpc_id=payload['vpc_id'],
+                                           route_table_id=payload['route_table_id'],
+                                           cidr_block='192.168.1.0/24',
+                                           tags=[{"Key": "Name", "Value": "mah subnet"}])
 
-        route_table = provider.RouteTable(payload['route_table_id'])
-        route_table.associate_with_subnet(SubnetId=subnet.id)
-
+        payload['subnet_id'] = subnet_id
         self.set_payload(cursor, payload)
+        self.set_state(cursor, TaskState.PROVISIONED)
         return True
 
 
@@ -236,53 +237,53 @@ class SecurityGroups(Task):
     def provision(self, cursor, provider):
         parent = self._get_parent(cursor, 'VPC')
         payload = parent.payload
+        sec_group_id = provider.create_security_group(name='slice_0',
+                                                      description='slice_0 sec group',
+                                                      vpc_id=payload['vpc_id'],
+                                                      tags=[{"Key": "Name", "Value": "mah security group"}])
 
-        vpc = provider.Vpc(payload['vpc_id'])
-        sec_group = provider.create_security_group(
-            GroupName='slice_0', Description='slice_0 sec group', VpcId=vpc.id)
-        sec_group.create_tags(Tags=[{"Key": "Name", "Value": "mah security group"}])
-
-        sec_group.authorize_ingress(
-            CidrIp='0.0.0.0/0',
-            IpProtocol='icmp',
-            FromPort=-1,
-            ToPort=-1
+        self.set_payload(cursor, dict(security_group_id=sec_group_id))
+        provider.security_group_authorize_ingress(
+            security_group_id=sec_group_id,
+            cidr_block='0.0.0.0/0',
+            protocol='icmp',
+            from_port=-1,
+            to_port=-1
         )
-
-        self.set_payload(cursor, dict(security_group_id=sec_group.id))
+        self.set_state(cursor, TaskState.PROVISIONED)
         return True
 
 
 class FirewallRules(Task):
     def provision(self, cursor, provider):
         self.set_state(cursor, TaskState.PROVISIONED)
+        return True
 
 
 class CreateEBS(Task):
     def provision(self, cursor, provider):
         self.set_state(cursor, TaskState.PROVISIONED)
+        return True
 
 
 class AttachEBS(Task):
     def provision(self, cursor, provider):
         self.set_state(cursor, TaskState.PROVISIONED)
+        return True
 
 
 class CreateInstance(Task):
     def provision(self, cursor, provider):
-        # sub_net_parent = self._get_parent(cursor, 'SubNets')
-        # subnet_id = sub_net_parent.payload['subnet_id']
-        # sec_group_parent = self._get_parent(cursor, 'SecurityGroups')
-        # sec_group_id = sec_group_parent.payload['security_group_id']
-
-        instances = provider.create_instances(
-            ImageId='ami-25a8db1f', InstanceType='t2.micro', MaxCount=1, MinCount=1,
-            NetworkInterfaces=[{'SubnetId': 'subnet-52152035', 'DeviceIndex': 0, 'AssociatePublicIpAddress': True,
+        instance_id = provider.create_instance(
+            image_id='ami-25a8db1f', vm_type='t2.micro',
+            network_interfaces=[{'SubnetId': 'subnet-52152035', 'DeviceIndex': 0, 'AssociatePublicIpAddress': True,
                                 'Groups': ['sg-6ff64317']}])
-        instances[0].wait_until_running()
-        self.set_payload(cursor, dict(instance_id=instances[0].id))
+        self.set_payload(cursor, dict(instance_id=instance_id))
         self.set_state(cursor, TaskState.PROVISIONED)
+        return True
 
 
 class BindIP(Task):
-    pass
+    def provision(self, cursor, provider):
+        self.set_state(cursor, TaskState.PROVISIONED)
+        return True

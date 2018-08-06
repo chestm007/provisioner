@@ -18,7 +18,7 @@ class GraphBuilder:
         self.cursor = self.connection.cursor(cursor_factory=psycopg2.extras.NamedTupleCursor)
 
     @abstractmethod
-    def create(self, cluster_id, num_nodes, num_dcs):
+    def create(self, cluster_id, num_nodes, num_dcs, provider):
         pass
 
     def load(self, cluster_id):
@@ -79,12 +79,12 @@ class GraphBuilder:
                           cluster=cluster_id,
                           data_centre=data_centre_id))
 
-    def create_datacentre(self, cluster_id):
+    def create_datacentre(self, cluster_id, provider):
         self.cursor.execute("""
-            INSERT INTO data_centre (cluster)
-            VALUES (%(cluster)s)
+            INSERT INTO data_centre (cluster, provider)
+            VALUES (%(cluster)s, %(provider)s)
             RETURNING id
-        """, dict(cluster=cluster_id))
+        """, dict(cluster=cluster_id, provider=provider))
         return self.cursor.fetchone().id
 
     def create_cluster(self, cluster_name):
@@ -95,16 +95,23 @@ class GraphBuilder:
         """, dict(name=cluster_name))
         return self.cursor.fetchone().id
 
+    @staticmethod
+    def get_builder(provider):
+        if provider == 'AWS':
+            return AWSGraphBuilder
+        elif provider == 'BASE':
+            return GraphBuilder
+
 
 class AWSGraphBuilder(GraphBuilder):
 
-    def create(self, cluster_name, num_nodes, num_dcs):
+    def create(self, cluster_name, num_nodes, num_dcs, provider):
         task_graph = nx.DiGraph()
 
         cluster_id = self.create_cluster(cluster_name)
         cluster = Cluster(task_graph).persist(self.cursor, cluster_id)
         for _ in range(num_dcs):
-            data_centre_id = self.create_datacentre(cluster_id)
+            data_centre_id = self.create_datacentre(cluster_id, provider)
 
             def persisted(task_obj):
                 return task_obj.persist(self.cursor, cluster_id)

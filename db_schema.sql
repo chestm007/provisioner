@@ -5,6 +5,7 @@ drop type if exists task_state;
 drop table if exists data_centre cascade;
 drop table if exists server cascade;
 drop table if exists network cascade;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 
 
@@ -17,6 +18,11 @@ CREATE TYPE task_state AS ENUM (
     'FAILED'
 );
 
+CREATE TYPE provider_type AS ENUM (
+    'AWS',
+    'BASE'
+)
+
 CREATE TABLE cluster (
     id UUID PRIMARY KEY NOT NULL DEFAULT gen_random_uuid(),
     name TEXT,
@@ -27,6 +33,7 @@ CREATE TABLE data_centre (
     id UUID PRIMARY KEY NOT NULL DEFAULT gen_random_uuid(),
     name TEXT,
     cluster UUID NOT NULL REFERENCES cluster(id),
+    provider provider_type, NOT_NULL,
     deleted_at TIMESTAMP WITH TIME ZONE
 );
 
